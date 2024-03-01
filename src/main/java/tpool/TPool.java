@@ -12,6 +12,7 @@ import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Executor;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Lock;
@@ -35,13 +36,16 @@ public final class TPool implements Executor {
 
     private final int minNumWorkers;
     private final int maxNumWorkers;
+    private final long idleTimeoutNanos;
 
-    // TODO: Add idle timeout to remove workers.
-    //    -> `WorkerType.EXTRA` worker should be removed after idle timeout.
+    // TODO: Add `idleTimeoutNanos` to remove workers.
+    //    -> `WorkerType.EXTRA` worker should be removed after `idleTimeoutNanos`.
     // TODO: Terminate long term task.
-    TPool(int minNumWorkers, int maxNumWorkers) {
+    //    -> Add `Watchdog` to watch pool and let it interrupts to thread which is processing task over `taskTimeoutNanos`
+    TPool(int minNumWorkers, int maxNumWorkers, long idleTimeoutNanos) {
         this.minNumWorkers = minNumWorkers;
         this.maxNumWorkers = maxNumWorkers;
+        this.idleTimeoutNanos = idleTimeoutNanos;
     }
 
     public static TPoolBuilder builder(int maxNumWorkers) {
@@ -130,6 +134,7 @@ public final class TPool implements Executor {
         // - This worker has been terminated by `idleTimeoutNanos`
         // - This worker is EXTRA worker so that it's terminated by `numWorkers` > `minNumWorkers`
         return (w) -> {
+            LOGGER.warn("Clean up {}, type: {}, reason: {}", w.workerName(), w.workerType(), w.terminationReason());
             workersLock.lock();
             try {
                 workers.remove(w);
@@ -154,7 +159,6 @@ public final class TPool implements Executor {
                 }
 
                 workersLock.unlock();
-                // TODO: Log the specific cause of termination.
             }
         };
     }
@@ -163,13 +167,13 @@ public final class TPool implements Executor {
      * Returns {@link WorkerType} of worker if more worker is needed.
      * {@code null} is returned if no worker is needed.
      */
+    // We have to use `workersLock` before this method is called.
     @Nullable
     private WorkerType hasEnoughWorkers() {
         if (coreWorkersSize() < minNumWorkers) {
             return WorkerType.CORE;
         }
 
-        // FIXME: We can check whether EXTRA worker should be added or not by `numExtraWorkers`.
         if (coreWorkersSize() >= minNumWorkers) {
             if (workersSize() < maxNumWorkers) {
                 return WorkerType.EXTRA;
@@ -205,7 +209,7 @@ public final class TPool implements Executor {
         doShutdown(false);
     }
 
-    public void doShutdown(boolean interrupted) {
+    private void doShutdown(boolean interrupted) {
         boolean needShutdownTasks = false;
         if (interrupted) {
             if (shutdownState.compareAndSet(ShutdownState.NOT_SHUTDOWN, ShutdownState.SHUTDOWN_BY_INTERRUPT)) {
@@ -242,7 +246,7 @@ public final class TPool implements Executor {
 
             if (interrupted) {
                 for (Worker w : workers) {
-                    w.interrupt(InterruptReason.SHUTDOWN);
+                    w.interrupt(TerminationReason.SHUTDOWN);
                 }
             }
 
@@ -271,23 +275,40 @@ public final class TPool implements Executor {
         void go() {
             LOGGER.debug("Started a new worker: {}, type: {}", threadName, workerType);
             try {
+                loop:
                 while (true) {
                     Runnable task;
                     try {
-                        task = queue.take();
+                        switch (workerType()) {
+                            case CORE:
+                                task = queue.take();
+                                break;
+                            case EXTRA:
+                                if ((task = queue.poll(idleTimeoutNanos, TimeUnit.NANOSECONDS)) == null) {
+                                    setTerminationReason(TerminationReason.IDLE_TIMEOUT);
+                                    LOGGER.debug("{} is idle timeout type: {}", workerName(), workerType());
+                                    break loop;
+                                }
+
+                                break;
+                            default:
+                                throw new Error();
+                        }
+
+
                         if (task == SHUTDOWN_TASK) {
                             LOGGER.warn("{} received `SHUTDOWN_TASK`", workerName());
                             break;
                         }
 
-                        LOGGER.warn("{} is ready to be processed", task);
+                        LOGGER.debug("{} is ready to be processed", task);
                         task.run();
                     } catch (InterruptedException cause) {
-                        if (interruptReason() == InterruptReason.SHUTDOWN) {
-                            LOGGER.debug("{} is interrupted", workerName());
+                        if (terminationReason() == TerminationReason.SHUTDOWN) {
+                            LOGGER.warn("{} is interrupted", workerName());
                             break;
                         } else {
-                            LOGGER.debug("Ignore interrupt");
+                            LOGGER.warn("Ignore interrupt");
                         }
                     }
                 }
@@ -297,7 +318,6 @@ public final class TPool implements Executor {
         }
 
         void cleanup() {
-            LOGGER.debug("Cleanup worker: {}", workerName());
             cleanupHandler.accept(this);
         }
     }
