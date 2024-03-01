@@ -17,7 +17,7 @@ abstract class AbstractWorker {
     final WorkerType workerType;
 
     @Nullable
-    private volatile InterruptReason interruptReason;
+    private volatile TerminationReason terminationReason;
 
     AbstractWorker(WorkerType workerType) {
         this.workerType = workerType;
@@ -44,14 +44,18 @@ abstract class AbstractWorker {
         return thread.isAlive();
     }
 
-    void interrupt(InterruptReason reason) {
-        interruptReason = reason;
+    void setTerminationReason(TerminationReason reason) {
+        this.terminationReason = reason;
+    }
+
+    void interrupt(TerminationReason reason) {
+        setTerminationReason(reason);
         thread.interrupt();
     }
 
     @Nullable
-    InterruptReason interruptReason() {
-        return interruptReason;
+    TerminationReason terminationReason() {
+        return terminationReason;
     }
 
     void join() {
