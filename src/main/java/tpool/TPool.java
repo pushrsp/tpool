@@ -21,6 +21,8 @@ import java.util.function.Consumer;
 
 public final class TPool implements Executor {
 
+    static final long TASK_NOT_STARTED_MARKER = 0;
+
     private static final Logger LOGGER = LoggerFactory.getLogger(TPool.class);
     private static final Worker[] EMPTY_WORKERS_ARRAY = new Worker[0];
     private static final Runnable SHUTDOWN_TASK = () -> {
@@ -31,6 +33,7 @@ public final class TPool implements Executor {
     private final AtomicInteger numCoreWorkers = new AtomicInteger(0);
     private final AtomicReference<ShutdownState> shutdownState = new AtomicReference<>(ShutdownState.NOT_SHUTDOWN);
     private final Set<Worker> workers = new HashSet<>();
+    private final Watchdog watchdog;
     private final BlockingQueue<Runnable> queue = new LinkedBlockingQueue<>();
     private final Lock workersLock = new ReentrantLock();
 
@@ -38,14 +41,14 @@ public final class TPool implements Executor {
     private final int maxNumWorkers;
     private final long idleTimeoutNanos;
 
-    // TODO: Add `idleTimeoutNanos` to remove workers.
-    //    -> `WorkerType.EXTRA` worker should be removed after `idleTimeoutNanos`.
-    // TODO: Terminate long term task.
-    //    -> Add `Watchdog` to watch pool and let it interrupts to thread which is processing task over `taskTimeoutNanos`
-    TPool(int minNumWorkers, int maxNumWorkers, long idleTimeoutNanos) {
+
+    TPool(int minNumWorkers, int maxNumWorkers,
+          long idleTimeoutNanos, long taskTimeoutNanos, long watchdogIntervalNanos) {
         this.minNumWorkers = minNumWorkers;
         this.maxNumWorkers = maxNumWorkers;
         this.idleTimeoutNanos = idleTimeoutNanos;
+
+        this.watchdog = taskTimeoutNanos != 0 ? new Watchdog(this, taskTimeoutNanos, watchdogIntervalNanos) : null;
     }
 
     public static TPoolBuilder builder(int maxNumWorkers) {
@@ -108,6 +111,10 @@ public final class TPool implements Executor {
                     newWorkers.add(newWorker(workerType));
                 }
             } finally {
+                if (watchdog != null) {
+                    watchdog.start();
+                }
+
                 workersLock.unlock();
             }
 
@@ -126,6 +133,10 @@ public final class TPool implements Executor {
         final Worker worker = new Worker(workerType, cleanupConsumer());
         workers.add(worker);
         return worker;
+    }
+
+    void forEach(Consumer<Worker> consumer) {
+        workers.forEach(consumer);
     }
 
     private Consumer<Worker> cleanupConsumer() {
@@ -183,7 +194,7 @@ public final class TPool implements Executor {
         return null;
     }
 
-    private boolean isShutdown() {
+    boolean isShutdown() {
         return shutdownState.get() != ShutdownState.NOT_SHUTDOWN;
     }
 
@@ -230,6 +241,10 @@ public final class TPool implements Executor {
             }
         }
 
+        if (watchdog != null) {
+            watchdog.interrupt(TerminationReason.SHUTDOWN);
+        }
+
         // Blocking for all workers are finished.
         Worker[] workers;
         while (true) {
@@ -266,6 +281,8 @@ public final class TPool implements Executor {
 
         private final Consumer<Worker> cleanupHandler;
 
+        private volatile long taskStartTimeNanos;
+
         public Worker(WorkerType workerType, Consumer<Worker> cleanupHandler) {
             super(workerType);
             this.cleanupHandler = cleanupHandler;
@@ -301,14 +318,22 @@ public final class TPool implements Executor {
                             break;
                         }
 
-                        LOGGER.debug("{} is ready to be processed", task);
-                        task.run();
+                        try {
+                            setTaskStartTimeNanos();
+                            LOGGER.debug("{} is executed", task);
+                            task.run();
+                        } finally {
+                            clearTaskStartTimeNanos();
+                        }
                     } catch (InterruptedException cause) {
-                        if (terminationReason() == TerminationReason.SHUTDOWN) {
+                        final TerminationReason terminationReason = terminationReason();
+                        if (terminationReason == TerminationReason.SHUTDOWN) {
                             LOGGER.warn("{} is interrupted", workerName());
                             break;
+                        } else if (terminationReason == TerminationReason.WATCHDOG) {
+                            LOGGER.warn("Watchdog interrupts {} because task timeout", workerName());
                         } else {
-                            LOGGER.warn("Ignore interrupt");
+                            LOGGER.warn("Unexpected interrupt is occurred");
                         }
                     }
                 }
@@ -317,7 +342,20 @@ public final class TPool implements Executor {
             }
         }
 
-        void cleanup() {
+        long taskStartTimeNanos() {
+            return taskStartTimeNanos;
+        }
+
+        private void setTaskStartTimeNanos() {
+            final long nanoTime = System.nanoTime();
+            taskStartTimeNanos = nanoTime == TASK_NOT_STARTED_MARKER ? 1 : nanoTime;
+        }
+
+        private void clearTaskStartTimeNanos() {
+            taskStartTimeNanos = TASK_NOT_STARTED_MARKER;
+        }
+
+        private void cleanup() {
             cleanupHandler.accept(this);
         }
     }
