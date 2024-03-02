@@ -26,6 +26,13 @@ abstract class AbstractWorker {
         this.threadName = thread.getName();
     }
 
+    AbstractWorker(WorkerType workerType, String workerName) {
+        this.workerType = workerType;
+        this.thread = new Thread(this::go);
+        this.thread.setName(workerName);
+        this.threadName = thread.getName();
+    }
+
     String workerName() {
         return threadName;
     }
@@ -64,6 +71,10 @@ abstract class AbstractWorker {
         } catch (InterruptedException e) {
             // Do not propagate to prevent incomplete shutdown.
         }
+    }
+
+    void sleep(long ms, int nanos) throws InterruptedException {
+        Thread.sleep(ms, nanos);
     }
 
     abstract void go();
