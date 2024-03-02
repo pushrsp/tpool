@@ -172,4 +172,49 @@ class TPoolTest {
         Thread.sleep(idleTimeout.toMillis() + 1000);
         assertThat(pool.extraWorkersSize()).isEqualTo(0);
     }
+
+    @Test
+    public void watchdogCanInterruptWorkerIfTaskIsExecutedForLongTime() throws Exception {
+        final int maxNumWorkers = 5;
+        final int minNumWorkers = 5;
+        final Duration idleTimeout = Duration.ofSeconds(1);
+        final Duration taskTimeout = Duration.ofSeconds(2);
+        final Duration watchdogInterval = Duration.ofSeconds(1);
+
+        final TPool pool = TPool.builder(maxNumWorkers)
+                .minNumWorkers(minNumWorkers)
+                .idleTimeout(idleTimeout)
+                .taskTimeout(taskTimeout)
+                .watchdogInterval(watchdogInterval)
+                .build();
+
+        final int numTasks = 5;
+        final CountDownLatch latch = new CountDownLatch(numTasks);
+        for (int i = 0; i < numTasks; i++) {
+            final int finalI = i;
+            pool.execute(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        Thread.sleep(30000);
+                    } catch (InterruptedException cause) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        latch.countDown();
+                    }
+                }
+
+                @Override
+                public String toString() {
+                    return "Task #" + finalI;
+                }
+            });
+        }
+
+        latch.await();
+
+        int coreWorkersSize = pool.coreWorkersSize();
+
+        assertThat(coreWorkersSize).isEqualTo(minNumWorkers);
+    }
 }
