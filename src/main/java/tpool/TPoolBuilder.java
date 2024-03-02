@@ -8,9 +8,13 @@ import static java.util.Objects.requireNonNull;
 
 public class TPoolBuilder {
 
+    private static final long DEFAULT_WATCHDOG_INTERVAL_SECONDS = 1;
+
     private final int maxNumWorkers;
     private int minNumWorkers;
     private long idleTimeoutNanos;
+    private long taskTimeoutNanos;
+    private long watchdogIntervalNanos = TimeUnit.SECONDS.toNanos(DEFAULT_WATCHDOG_INTERVAL_SECONDS);
 
     TPoolBuilder(int maxNumWorkers) {
         checkArgument(maxNumWorkers > 0, "maxWorkers: %s (expected: > 0)", maxNumWorkers);
@@ -37,7 +41,34 @@ public class TPoolBuilder {
         return idleTimeout(idleTimeout.toNanos(), TimeUnit.NANOSECONDS);
     }
 
+    public TPoolBuilder taskTimeout(long taskTimeout, TimeUnit unit) {
+        checkArgument(taskTimeout >= 0, "taskTimeout: %s (expected: >= 0)");
+        this.taskTimeoutNanos = requireNonNull(unit, "unit").toNanos(taskTimeout);
+        return this;
+    }
+
+    public TPoolBuilder taskTimeout(Duration taskTimeout) {
+        requireNonNull(taskTimeout, "taskTimeout");
+        checkArgument(!taskTimeout.isNegative(), "taskTimeout: %s (expected: >= 0)");
+        return taskTimeout(taskTimeout.toNanos(), TimeUnit.NANOSECONDS);
+    }
+
+    public TPoolBuilder watchdogInterval(long watchdogInterval, TimeUnit unit) {
+        checkArgument(watchdogInterval > 0, "watchdogInterval: %s (expected: > 0)");
+        watchdogIntervalNanos = requireNonNull(unit, "unit").toNanos(watchdogInterval);
+        return this;
+    }
+
+    public TPoolBuilder watchdogInterval(Duration watchdogInterval) {
+        requireNonNull(watchdogInterval, "watchdogInterval");
+        checkArgument(!watchdogInterval.isZero() &&
+                        !watchdogInterval.isNegative(),
+                "watchdogInterval: %s (expected: > 0)");
+        return watchdogInterval(watchdogInterval.toNanos(), TimeUnit.NANOSECONDS);
+    }
+
     public TPool build() {
-        return new TPool(minNumWorkers, maxNumWorkers, idleTimeoutNanos);
+        return new TPool(minNumWorkers, maxNumWorkers,
+                idleTimeoutNanos, taskTimeoutNanos, watchdogIntervalNanos);
     }
 }
