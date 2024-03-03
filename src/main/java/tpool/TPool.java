@@ -42,6 +42,7 @@ public final class TPool implements Executor {
     private final long idleTimeoutNanos;
 
 
+    // TODO: Implements `ExecutorService`
     TPool(int minNumWorkers, int maxNumWorkers,
           long idleTimeoutNanos, long taskTimeoutNanos, long watchdogIntervalNanos) {
         this.minNumWorkers = minNumWorkers;
@@ -135,7 +136,7 @@ public final class TPool implements Executor {
         return worker;
     }
 
-    void forEach(Consumer<Worker> consumer) {
+    void forEachWorker(Consumer<Worker> consumer) {
         workers.forEach(consumer);
     }
 
@@ -246,14 +247,8 @@ public final class TPool implements Executor {
         }
 
         // Blocking for all workers are finished.
-        Worker[] workers;
         while (true) {
-            workersLock.lock();
-            try {
-                workers = this.workers.toArray(EMPTY_WORKERS_ARRAY);
-            } finally {
-                workersLock.unlock();
-            }
+            final Worker[] workers = copyWorkers();
 
             if (workers.length == 0) {
                 break;
@@ -269,6 +264,17 @@ public final class TPool implements Executor {
                 w.join();
             }
         }
+    }
+
+    private Worker[] copyWorkers() {
+        Worker[] workers;
+        workersLock.lock();
+        try {
+            workers = this.workers.toArray(EMPTY_WORKERS_ARRAY);
+        } finally {
+            workersLock.unlock();
+        }
+        return workers;
     }
 
     enum ShutdownState {
