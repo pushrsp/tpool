@@ -5,6 +5,10 @@ import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.TimeUnit;
 
+/**
+ * Watchdog keeps finding out the worker that is
+ * processing the task more than `taskTimeoutNanos`.
+ */
 final class Watchdog extends AbstractWorker {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(Watchdog.class);
@@ -35,7 +39,7 @@ final class Watchdog extends AbstractWorker {
                     continue;
                 }
 
-                tPool.forEach(w -> {
+                tPool.forEachWorker(w -> {
                     final long taskStartTimeNanos = w.taskStartTimeNanos();
                     if (taskStartTimeNanos == TPool.TASK_NOT_STARTED_MARKER) {
                         return;
